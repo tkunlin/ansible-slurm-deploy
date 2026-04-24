@@ -1,0 +1,55 @@
+---
+- name: Preflight on all Slurm nodes
+  hosts: slurm_nodes
+  gather_facts: true
+  become: true
+  tasks:
+    - name: Ensure Debian-family only
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family == 'Debian'
+        fail_msg: "This playbook only supports Debian/Ubuntu nodes."
+
+    - name: Refresh apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Install baseline runtime packages
+      ansible.builtin.apt:
+        name:
+          - munge
+          - libmunge2
+          - curl
+          - wget
+          - ca-certificates
+          - acl
+        state: present
+
+- name: Prepare Slurm build host
+  hosts: slurm_build
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Install Debian package build prerequisites
+      ansible.builtin.apt:
+        name:
+          - build-essential
+          - fakeroot
+          - devscripts
+          - equivs
+          - dpkg-dev
+          - debhelper
+          - ca-certificates
+          - wget
+          - gnupg
+        state: present
+        update_cache: true
+
+    - name: Ensure build root exists
+      ansible.builtin.file:
+        path: "{{ slurm_build_root }}"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0755'

@@ -1,0 +1,54 @@
+---
+- name: Verify runtime services on all nodes
+  hosts: slurm_nodes
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Check munge local encode/decode test
+      ansible.builtin.shell: |
+        set -euo pipefail
+        munge -n | unmunge | awk -F': ' '/STATUS/ {print $2}'
+      args:
+        executable: /bin/bash
+      register: munge_status
+      changed_when: false
+
+    - name: Show munge status
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} munge status = {{ munge_status.stdout }}"
+
+    - name: Check slurmctld on controller
+      when: inventory_hostname == slurm_control_host
+      ansible.builtin.command: scontrol ping
+      register: scontrol_ping
+      changed_when: false
+      retries: 10
+      delay: 3
+      until: scontrol_ping.rc == 0
+
+    - name: Show controller ping result
+      when: inventory_hostname == slurm_control_host
+      ansible.builtin.debug:
+        var: scontrol_ping.stdout_lines
+
+    - name: Check sinfo on controller
+      when: inventory_hostname == slurm_control_host
+      ansible.builtin.command: sinfo -N -l
+      register: sinfo_output
+      changed_when: false
+
+    - name: Show sinfo output
+      when: inventory_hostname == slurm_control_host
+      ansible.builtin.debug:
+        var: sinfo_output.stdout_lines
+
+    - name: Check slurmd service on compute nodes
+      when: inventory_hostname != slurm_control_host
+      ansible.builtin.command: systemctl is-active slurmd
+      register: slurmd_status
+      changed_when: false
+
+    - name: Show slurmd status
+      when: inventory_hostname != slurm_control_host
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} slurmd = {{ slurmd_status.stdout }}"

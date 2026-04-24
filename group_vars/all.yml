@@ -1,0 +1,37 @@
+---
+ansible_user: "{{ lookup('env', 'ANSIBLE_REMOTE_USER') | default('mitac', true) }}"
+ansible_become: true
+ansible_python_interpreter: /usr/bin/python3
+
+slurm_control_host: "{{ lookup('env', 'SLURM_CONTROL_HOST') | default('slurm-ctrl', true) }}"
+slurm_build_host: "{{ slurm_control_host }}"
+slurm_cluster_name: cluster01
+
+# 2026-04-17 時官方下載站可取得 25.05.7 與 25.11.5；此處先用較保守的 25.05.7。
+slurm_version: 25.05.7
+slurm_arch: amd64
+slurm_tarball: "slurm-{{ slurm_version }}.tar.bz2"
+slurm_download_url: "https://download.schedmd.com/slurm/{{ slurm_tarball }}"
+
+slurm_build_root: /usr/local/src/slurm-build
+slurm_source_dir: "{{ slurm_build_root }}/slurm-{{ slurm_version }}"
+slurm_artifact_dir_local: "{{ playbook_dir }}/../artifacts/slurm/{{ slurm_version }}"
+slurm_remote_pkg_dir: /var/tmp/slurm-debs
+
+slurm_user: slurm
+slurm_group: slurm
+slurm_conf_dir: /etc/slurm
+slurm_log_dir: /var/log/slurm
+slurm_state_dir: /var/spool/slurmctld
+slurm_spool_dir: /var/spool/slurmd
+slurm_realmemory_reserve_mb: 1024
+
+slurm_partition_name: debug
+slurm_partition_default: "YES"
+slurm_partition_max_time: INFINITE
+slurm_select_type_parameters: CR_Core_Memory
+
+munge_key_path: /etc/munge/munge.key
+
+# 目前先不做 slurmdbd / accounting，之後若要再補 playbook。
+slurm_install_accounting: false

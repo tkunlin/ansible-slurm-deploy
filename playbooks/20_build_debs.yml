@@ -1,0 +1,75 @@
+---
+- name: Build official SchedMD Debian packages on build host
+  hosts: slurm_build
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Download Slurm source tarball
+      ansible.builtin.get_url:
+        url: "{{ slurm_download_url }}"
+        dest: "{{ slurm_build_root }}/{{ slurm_tarball }}"
+        mode: '0644'
+
+    - name: Unpack Slurm source tree
+      ansible.builtin.unarchive:
+        src: "{{ slurm_build_root }}/{{ slurm_tarball }}"
+        dest: "{{ slurm_build_root }}"
+        remote_src: true
+        creates: "{{ slurm_source_dir }}/debian/control"
+
+    - name: Ensure build tree ownership belongs to remote user
+      ansible.builtin.file:
+        path: "{{ slurm_build_root }}"
+        state: directory
+        recurse: true
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+
+    - name: Install Slurm package build-dependencies from debian/control
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export DEBIAN_FRONTEND=noninteractive
+        mk-build-deps -i \
+          -t "apt-get -y --no-install-recommends" \
+          debian/control
+      args:
+        chdir: "{{ slurm_source_dir }}"
+        executable: /bin/bash
+
+    - name: Build slurm-smd Debian packages
+      become: false
+      ansible.builtin.shell: |
+        set -euo pipefail
+        debuild -b -uc -us
+      args:
+        chdir: "{{ slurm_source_dir }}"
+        executable: /bin/bash
+        creates: "{{ slurm_build_root }}/slurm-smd_{{ slurm_version }}-1_{{ slurm_arch }}.deb"
+
+    - name: Find built Slurm deb packages
+      ansible.builtin.find:
+        paths: "{{ slurm_build_root }}"
+        patterns:
+          - "slurm-smd*.deb"
+        recurse: false
+        file_type: file
+      register: built_debs
+
+    - name: Ensure local artifact directory exists
+      delegate_to: localhost
+      become: false
+      ansible.builtin.file:
+        path: "{{ slurm_artifact_dir_local }}"
+        state: directory
+        owner: "{{ lookup('env', 'USER') }}"
+        group: "{{ lookup('env', 'USER') }}"
+        mode: '0755'
+
+    - name: Fetch built deb packages to local artifact directory
+      ansible.builtin.fetch:
+        src: "{{ item.path }}"
+        dest: "{{ slurm_artifact_dir_local }}/"
+        flat: true
+      loop: "{{ built_debs.files | sort(attribute='path') }}"
+      loop_control:
+        label: "{{ item.path | basename }}"

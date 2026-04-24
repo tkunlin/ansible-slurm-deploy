@@ -1,0 +1,252 @@
+---
+- name: Deploy Slurm packages and configuration to all nodes
+  hosts: slurm_nodes
+  gather_facts: true
+  become: true
+  vars:
+    slurm_compute_hosts: "{{ groups['slurm_nodes'] | difference([slurm_control_host]) | sort }}"
+  pre_tasks:
+    - name: Assert controller exists in dynamic inventory
+      ansible.builtin.assert:
+        that:
+          - slurm_control_host in groups['slurm_nodes']
+        fail_msg: "slurm_control_host={{ slurm_control_host }} was not found in /etc/hosts-driven inventory."
+
+    - name: Ensure local artifact directory exists on controller machine running Ansible
+      delegate_to: localhost
+      become: false
+      ansible.builtin.stat:
+        path: "{{ slurm_artifact_dir_local }}"
+      register: local_artifact_dir
+
+    - name: Fail when local artifact directory is missing
+      delegate_to: localhost
+      become: false
+      ansible.builtin.assert:
+        that:
+          - local_artifact_dir.stat.exists
+        fail_msg: "Local artifact directory {{ slurm_artifact_dir_local }} does not exist. Run 20_build_debs.yml first."
+
+  tasks:
+    - name: Ensure Slurm system group exists
+      ansible.builtin.group:
+        name: "{{ slurm_group }}"
+        system: true
+        state: present
+
+    - name: Ensure Slurm system user exists
+      ansible.builtin.user:
+        name: "{{ slurm_user }}"
+        group: "{{ slurm_group }}"
+        system: true
+        shell: /usr/sbin/nologin
+        create_home: false
+        state: present
+
+    - name: Ensure remote package directory exists
+      ansible.builtin.file:
+        path: "{{ slurm_remote_pkg_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Copy built Slurm deb packages to remote nodes
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "{{ slurm_remote_pkg_dir }}/{{ item | basename }}"
+        mode: '0644'
+      loop: "{{ lookup('fileglob', slurm_artifact_dir_local ~ '/slurm-smd*.deb', wantlist=True) | sort }}"
+      loop_control:
+        label: "{{ item | basename }}"
+
+    - name: Install Slurm packages on controller node
+      when: inventory_hostname == slurm_control_host
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update
+        apt-get install -y \
+          {{ slurm_remote_pkg_dir }}/slurm-smd_*.deb \
+          {{ slurm_remote_pkg_dir }}/slurm-smd-client_*.deb \
+          {{ slurm_remote_pkg_dir }}/slurm-smd-slurmctld_*.deb
+      args:
+        executable: /bin/bash
+
+    - name: Install Slurm packages on compute nodes
+      when: inventory_hostname != slurm_control_host
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update
+        apt-get install -y \
+          {{ slurm_remote_pkg_dir }}/slurm-smd_*.deb \
+          {{ slurm_remote_pkg_dir }}/slurm-smd-client_*.deb \
+          {{ slurm_remote_pkg_dir }}/slurm-smd-slurmd_*.deb
+      args:
+        executable: /bin/bash
+
+    - name: Ensure Slurm configuration directory exists
+      ansible.builtin.file:
+        path: "{{ slurm_conf_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Ensure Slurm log directory exists
+      ansible.builtin.file:
+        path: "{{ slurm_log_dir }}"
+        state: directory
+        owner: "{{ slurm_user }}"
+        group: "{{ slurm_group }}"
+        mode: '0755'
+
+    - name: Ensure controller state directory exists
+      when: inventory_hostname == slurm_control_host
+      ansible.builtin.file:
+        path: "{{ slurm_state_dir }}"
+        state: directory
+        owner: "{{ slurm_user }}"
+        group: "{{ slurm_group }}"
+        mode: '0755'
+
+    - name: Ensure compute spool directory exists
+      when: inventory_hostname != slurm_control_host
+      ansible.builtin.file:
+        path: "{{ slurm_spool_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Check munge key on controller
+      when: inventory_hostname == slurm_control_host
+      ansible.builtin.stat:
+        path: "{{ munge_key_path }}"
+      register: munge_key_stat
+
+    - name: Generate munge key on controller when missing
+      when:
+        - inventory_hostname == slurm_control_host
+        - not munge_key_stat.stat.exists
+      ansible.builtin.shell: |
+        set -euo pipefail
+        umask 077
+        head -c 1024 /dev/urandom > {{ munge_key_path }}
+        chown munge:munge {{ munge_key_path }}
+        chmod 0400 {{ munge_key_path }}
+      args:
+        executable: /bin/bash
+
+    - name: Read munge key from controller
+      run_once: true
+      delegate_to: "{{ slurm_control_host }}"
+      ansible.builtin.slurp:
+        src: "{{ munge_key_path }}"
+      register: munge_key_blob
+
+    - name: Distribute munge key to all nodes
+      ansible.builtin.copy:
+        dest: "{{ munge_key_path }}"
+        content: "{{ munge_key_blob.content | b64decode }}"
+        owner: munge
+        group: munge
+        mode: '0400'
+      notify: restart munge
+
+    - name: Write slurm.conf to all nodes
+      ansible.builtin.copy:
+        dest: "{{ slurm_conf_dir }}/slurm.conf"
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          ClusterName={{ slurm_cluster_name }}
+          SlurmctldHost={{ slurm_control_host }}
+          SlurmUser={{ slurm_user }}
+          SlurmdUser=root
+          AuthType=auth/munge
+          CredType=cred/munge
+          StateSaveLocation={{ slurm_state_dir }}
+          SlurmdSpoolDir={{ slurm_spool_dir }}
+          SlurmctldPidFile=/run/slurmctld.pid
+          SlurmdPidFile=/run/slurmd.pid
+          SlurmctldLogFile={{ slurm_log_dir }}/slurmctld.log
+          SlurmdLogFile={{ slurm_log_dir }}/slurmd.log
+          SwitchType=switch/none
+          MpiDefault=none
+          ProctrackType=proctrack/cgroup
+          TaskPlugin=task/cgroup
+          SchedulerType=sched/backfill
+          SelectType=select/cons_tres
+          SelectTypeParameters={{ slurm_select_type_parameters }}
+          ReturnToService=2
+          SlurmctldTimeout=120
+          SlurmdTimeout=300
+          InactiveLimit=0
+          KillWait=30
+          MinJobAge=300
+          Waittime=0
+          AccountingStorageType=accounting_storage/none
+          JobCompType=jobcomp/none
+          MailProg=/bin/true
+          {% for n in slurm_compute_hosts %}
+          NodeName={{ n }} NodeAddr={{ hostvars[n].ansible_host }} CPUs={{ hostvars[n].ansible_processor_vcpus | default(1) }} RealMemory={{ [1024, (hostvars[n].ansible_memtotal_mb | int) - (slurm_realmemory_reserve_mb | int)] | max }} State=UNKNOWN
+          {% endfor %}
+          PartitionName={{ slurm_partition_name }} Nodes={{ slurm_compute_hosts | join(',') }} Default={{ slurm_partition_default }} MaxTime={{ slurm_partition_max_time }} State=UP
+      notify:
+        - restart slurmctld
+        - restart slurmd
+
+    - name: Write cgroup.conf to all nodes
+      ansible.builtin.copy:
+        dest: "{{ slurm_conf_dir }}/cgroup.conf"
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          CgroupAutomount=yes
+          ConstrainCores=yes
+          ConstrainRAMSpace=yes
+          ConstrainSwapSpace=no
+          ConstrainDevices=yes
+      notify:
+        - restart slurmctld
+        - restart slurmd
+
+    - name: Enable and start munge service
+      ansible.builtin.systemd:
+        name: munge
+        state: started
+        enabled: true
+
+    - name: Enable and start slurmctld service on controller
+      when: inventory_hostname == slurm_control_host
+      ansible.builtin.systemd:
+        name: slurmctld
+        state: started
+        enabled: true
+
+    - name: Enable and start slurmd service on compute nodes
+      when: inventory_hostname != slurm_control_host
+      ansible.builtin.systemd:
+        name: slurmd
+        state: started
+        enabled: true
+
+  handlers:
+    - name: restart munge
+      ansible.builtin.systemd:
+        name: munge
+        state: restarted
+
+    - name: restart slurmctld
+      when: inventory_hostname == slurm_control_host
+      ansible.builtin.systemd:
+        name: slurmctld
+        state: restarted
+
+    - name: restart slurmd
+      when: inventory_hostname != slurm_control_host
+      ansible.builtin.systemd:
+        name: slurmd
+        state: restarted
