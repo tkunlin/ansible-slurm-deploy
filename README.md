@@ -1,8 +1,8 @@
 # ansible-slurm-deploy
 
 ## Prerequisite
-* Deploy ssh-key  to each node
-* Each node need to sync time 
+* [Deploy ssh-eky to each node](https://github.com/tkunlin/ansible-ssh-bootstrap)
+* [Each node need to sync time](https://github.com/tkunlin/ansible-time-sync)
 
 
 ## Deployment
